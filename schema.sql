@@ -65,3 +65,69 @@ on conflict do nothing;
 
 -- Make yourself admin: replace the address with the one you'll sign up with, then run this line.
 -- insert into public.admins (email) values ('you@example.com');
+
+
+-- Krillion: lock scores. Run once in Supabase → SQL Editor → New query (safe to run again).
+-- Enforced by the database, so it holds even if someone bypasses the website:
+--   • a logged score (and its emoji row) can never be changed or removed
+--   • a new score can only be for the current day (with a few hours' slack for other time zones)
+--   • players can't delete their own profile (which would wipe their scores)
+-- The site admin (public.admins) and the SQL Editor itself are exempt, so you can still fix mistakes.
+create or replace function public.lock_scores() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  k text; old_s jsonb := '{}'; old_g jsonb := '{}'; new_s jsonb; new_g jsonb;
+  lo date := ((now() at time zone 'utc') - interval '12 hours')::date;
+  hi date := ((now() at time zone 'utc') + interval '14 hours')::date;
+begin
+  if coalesce(new.coll, old.coll) <> 'players' then return coalesce(new, old); end if;
+  if auth.uid() is null or public.is_admin() then return coalesce(new, old); end if;
+
+  if tg_op = 'DELETE' then
+    raise exception 'Profiles can''t be deleted. Ask the admin.';
+  end if;
+
+  if tg_op = 'INSERT' then
+    -- an upsert onto an existing row is checked by the UPDATE trigger
+    if exists (select 1 from public.docs where coll = new.coll and id = new.id) then return new; end if;
+  else
+    old_s := coalesce(old.data -> 'scores', '{}'); old_g := coalesce(old.data -> 'games', '{}');
+  end if;
+  new_s := coalesce(new.data -> 'scores', '{}'); new_g := coalesce(new.data -> 'games', '{}');
+  if jsonb_typeof(new_s) <> 'object' or jsonb_typeof(new_g) <> 'object' then
+    raise exception 'Invalid score data.';
+  end if;
+
+  for k in select jsonb_object_keys(old_s) loop
+    if (new_s -> k) is distinct from (old_s -> k) then
+      raise exception 'Scores can''t be changed or removed once they''re logged.';
+    end if;
+  end loop;
+  for k in select jsonb_object_keys(old_g) loop
+    if (new_g -> k) is distinct from (old_g -> k) then
+      raise exception 'Scores can''t be changed or removed once they''re logged.';
+    end if;
+  end loop;
+
+  for k in select jsonb_object_keys(new_s) loop
+    if not (old_s ? k) then
+      if k !~ '^\d{4}-\d{2}-\d{2}$' or k::date < lo or k::date > hi then
+        raise exception 'You can only log today''s result, on the day.';
+      end if;
+      if jsonb_typeof(new_s -> k) <> 'number' or (new_s ->> k)::numeric < 0 or (new_s ->> k)::numeric > 1000000
+         or (new_s ->> k)::numeric <> trunc((new_s ->> k)::numeric) then
+        raise exception 'That score isn''t valid.';
+      end if;
+    end if;
+  end loop;
+  for k in select jsonb_object_keys(new_g) loop
+    if not (old_g ? k) and not (new_s ? k and not (old_s ? k)) then
+      raise exception 'You can only log today''s result, on the day.';
+    end if;
+  end loop;
+  return new;
+end $$;
+
+drop trigger if exists lock_scores on public.docs;
+create trigger lock_scores before insert or update or delete on public.docs
+  for each row execute function public.lock_scores();
