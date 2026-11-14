@@ -323,6 +323,7 @@ const leagueMembers = lg => membersOf(lg, "leagues");
 const isCreator = def => !!def && (def.createdBy === me.uid);
 const manages = def => canWrite && !!db && !!def && (me.isOwner || isCreator(def));
 function stripId(doc) { const { id, ...rest } = doc || {}; return rest; }
+function defData(def) { const d = stripId(def); delete d.createdBy; delete d.groups; return d; }
 function saveDef(kind, def, data) {
   const coll = KINDS[kind], owner = def?.createdBy || me.uid, id = def?.id;
   const exists = S.raw[coll].has(owner);
@@ -375,14 +376,45 @@ function joinControl(kind, def, small) {
 }
 
 /* ---------- league maths ---------- */
+/* Seasons last 14 days, counted in blocks from the league's season anchor.
+   Ending a season early records it in lg.history and moves the anchor to today. */
+const SEASON_DAYS = 14;
+function daysBetween(a, b) { const f = s => { const [y, m, d] = s.split("-").map(Number); return Date.UTC(y, m - 1, d); }; return Math.round((f(b) - f(a)) / 864e5); }
+function dayOf(ts) { const d = new Date(ts); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function seasonsOf(lg) {
+  const today = todayStr(), history = Array.isArray(lg.history) ? lg.history.filter(h => h && h.start && h.end) : [];
+  const anchor = lg.seasonAnchor || lg.startDate || today;
+  const past = history.map(h => ({ start: h.start, end: h.end, early: !!h.early }));
+  let k = 0;
+  if (today >= anchor) {
+    k = Math.floor(daysBetween(anchor, today) / SEASON_DAYS);
+    for (let i = 0; i < k; i++) past.push({ start: addDays(anchor, i * SEASON_DAYS), end: addDays(anchor, i * SEASON_DAYS + SEASON_DAYS - 1) });
+  }
+  past.forEach((x, i) => x.no = i + 1);
+  const start = addDays(anchor, k * SEASON_DAYS);
+  const current = { start, end: addDays(start, SEASON_DAYS - 1), no: past.length + 1, current: true, notStarted: today < start };
+  current.day = current.notStarted ? 0 : daysBetween(start, today) + 1;
+  return { past, current };
+}
+/* the day a player joined the league: their own join, or the day the creator added them after creating it.
+   Players picked when the league was created count as there from the start. */
+function joinDay(lg, pid) {
+  const m = S.raw.memberships.get(pid)?.leagues?.[lg.id];
+  const ts = (m && !m.left && m.at) || lg.addedAt?.[pid];
+  return ts ? dayOf(ts) : null;
+}
+function periodRange(lg, period) {
+  const today = todayStr(), { past, current } = seasonsOf(lg);
+  if (period && period.startsWith("past:")) { const x = past[+period.slice(5)]; if (x) return { ...x, season: x }; }
+  if (period === "7") return { start: [current.start, addDays(today, -6)].sort()[1], end: today, season: null };
+  return { ...current, season: current };
+}
 function leagueTable(lg, period) {
   const today = todayStr();
-  let from = lg.startDate || today;
-  if (period === "7") from = [from, addDays(today, -6)].sort()[1];
-  if (period === "month") from = [from, today.slice(0, 8) + "01"].sort()[1];
-  const dates = dateRange(from, today);
+  const range = periodRange(lg, period || "season");
+  const dates = dateRange(range.start, [range.end, today].sort()[0]);
   const members = leagueMembers(lg);
-  const rows = members.map(pid => ({ pid, name: pname(pid), P: 0, pts: 0, best: 0, W: 0, form: [] }));
+  const rows = members.map(pid => ({ pid, name: pname(pid), P: 0, pts: 0, real: 0, bonus: 0, filled: 0, best: 0, W: 0, form: [] }));
   const dayRank = {};
   for (const d of dates) {
     const vals = rows.map(r => sc(r.pid, d));
@@ -391,16 +423,36 @@ function leagueTable(lg, period) {
     const max = Math.max(...played);
     rows.forEach((r, i) => {
       const v = vals[i]; if (v == null) return;
-      r.P++; r.pts += v; r.best = Math.max(r.best, v);
+      r.P++; r.real += v; r.best = Math.max(r.best, v);
       if (v === max) r.W++;
       (dayRank[d] ||= {})[r.pid] = 1 + played.filter(x => x > v).length;
     });
   }
+  rows.forEach(r => {
+    r.avg = r.P ? r.real / r.P : 0;
+    // catch-up: whole-season tables only; days before the player joined with no score get their season average
+    if (lg.catchUp && range.season && r.P) {
+      const jd = joinDay(lg, r.pid);
+      if (jd) r.filled = dates.filter(d => d < jd && sc(r.pid, d) == null).length;
+      r.bonus = Math.round(r.avg * r.filled);
+    }
+    r.pts = r.real + r.bonus;
+  });
   const last5 = dates.slice(-5);
-  rows.forEach(r => { r.avg = r.P ? r.pts / r.P : 0; r.form = last5.map(d => ({ d, rank: dayRank[d]?.[r.pid] ?? null })); });
+  rows.forEach(r => { r.form = last5.map(d => ({ d, rank: dayRank[d]?.[r.pid] ?? null })); });
   rows.sort((a, b) => b.pts - a.pts || b.avg - a.avg || b.W - a.W || a.name.localeCompare(b.name));
   let pos = 0; rows.forEach((r, i) => { if (i === 0 || r.pts !== rows[i - 1].pts) pos = i + 1; r.pos = pos; });
-  return { rows, dates, from };
+  return { rows, dates, from: range.start, range };
+}
+function endSeasonFlow(lg) {
+  const { past, current } = seasonsOf(lg), today = todayStr();
+  if (current.notStarted || current.start >= today) return toast("This season only started today, so there's nothing to end yet.");
+  const t = leagueTable(lg, "season"), lead = t.rows[0];
+  confirmDialog(`End season ${current.no} now?`,
+    `Season ${current.no} closes with yesterday's scores${lead && lead.pts ? ` (${lead.name} is top on ${fmtN(lead.pts)})` : ""}. Season ${current.no + 1} starts today and runs 14 days, so everyone starts from zero. Today's scores count in the new season. This can't be undone.`,
+    "End season",
+    // every finished season goes into history, because moving the anchor would otherwise lose the automatic ones
+    () => { ui.leaguePeriod = "season"; return saveDef("leagues", lg, { ...defData(lg), history: [...past.map(x => ({ start: x.start, end: x.end, early: !!x.early })), { start: current.start, end: addDays(today, -1), early: true }], seasonAnchor: today }).then(() => { toast(`Season ${current.no + 1} has started.`); updateLeagueDetail(); }); });
 }
 
 /* ---------- tournament engine ---------- */
@@ -768,6 +820,23 @@ function renderMyLog() {
 }
 
 /* ---------- league views ---------- */
+function seasonLabel(lg, long) {
+  const c = seasonsOf(lg).current;
+  if (c.notStarted) return `season ${c.no} starts ${fmtDate(c.start, long)}`;
+  const left = SEASON_DAYS - c.day;
+  return `season ${c.no} · day ${c.day} of ${SEASON_DAYS}` + (long ? ` · ${left ? `ends ${fmtDate(c.end, true)}` : "last day today"}` : "");
+}
+function periodNote(lg, t) {
+  const r = t.range;
+  if (r.season && r.current) return `Season ${r.no}: ${fmtDate(r.start, true)} – ${fmtDate(r.end, true)}.`;
+  if (r.season) return `Season ${r.no}: ${fmtDate(r.start, true)} – ${fmtDate(r.end, true)}${r.early ? " (ended early)" : ""}. Final table.`;
+  return `${fmtDate(r.start, true)} – today.`;
+}
+function pastSeasonsHtml(lg, SS) {
+  if (!SS.past.length) return "";
+  const items = SS.past.map((x, i) => ({ x, i, t: leagueTable(lg, "past:" + i) })).reverse();
+  return `<section class="panel"><h2>Past seasons</h2><div class="tablewrap"><table><thead><tr><th>Season</th><th>Dates</th><th>Winner</th><th class="n">Pts</th><th></th></tr></thead><tbody>${items.map(({ x, i, t }) => { const w = t.rows[0]; return `<tr><td>${x.no}</td><td>${fmtDate(x.start)} – ${fmtDate(x.end)}${x.early ? ' <span class="note">(ended early)</span>' : ""}</td><td>${w && w.pts ? esc(w.name) : "–"}</td><td class="n">${w && w.pts ? fmtN(w.pts) : "–"}</td><td><button class="btn small" type="button" data-season="${i}">View table</button></td></tr>`; }).join("")}</tbody></table></div></section>`;
+}
 function searchBlock(kind) {
   const what = kind === "leagues" ? "leagues" : "tournaments";
   return `<section class="panel" style="display:grid;gap:12px"><div class="ph"><h2>Find ${kind === "leagues" ? "a league" : "a tournament"}</h2><span class="pill" id="lf-count"></span></div>
@@ -783,7 +852,7 @@ function fillSearch(kind, others, card) {
 function leagueCard(lg) {
   const t = leagueTable(lg, "season"); const lead = t.rows[0]; const n = leagueMembers(lg).length;
   return `<div class="card"><h3><a href="#league-${esc(lg.id)}" style="text-decoration:none">${esc(lg.name)}</a></h3>
-    <div class="meta">${n}/20 players · since ${fmtDate(lg.startDate)}${S.players.has(lg.createdBy) ? " · by " + esc(pname(lg.createdBy)) : ""}${lg.codeHash ? " · private" : ""}</div>
+    <div class="meta">${n}/20 players · ${seasonLabel(lg)}${S.players.has(lg.createdBy) ? " · by " + esc(pname(lg.createdBy)) : ""}${lg.codeHash ? " · private" : ""}</div>
     <div class="lead">${lead && lead.pts ? `Top: <b>${esc(lead.name)}</b> <span class="num">${fmtN(lead.pts)}</span>` : "No scores yet"}</div>
     <div class="row">${joinControl("leagues", lg, true)}<a class="btn small" href="#league-${esc(lg.id)}" style="text-decoration:none">View table</a></div></div>`;
 }
@@ -802,29 +871,34 @@ function updateLeagueDetail() {
   const members = leagueMembers(lg), inIt = members.includes(me.uid);
   const t = leagueTable(lg, ui.leaguePeriod);
   const today = todayStr();
-  const week = dateRange([lg.startDate, addDays(today, -6)].sort()[1], today);
+  const SS = seasonsOf(lg);
+  if (ui.leaguePeriod === "month" || (ui.leaguePeriod.startsWith("past:") && !SS.past[+ui.leaguePeriod.slice(5)])) ui.leaguePeriod = "season";
+  const week = dateRange([SS.current.start, addDays(today, -6)].sort()[1], today);
   const rowsHtml = t.rows.map(r => `<tr class="${r.pos === 1 && r.pts > 0 ? "leader" : ""}">
       <td class="pos">${r.pos}</td><td>${esc(r.name)}${r.pid === me.uid ? ' <span class="note">(you)</span>' : ""}</td>
       <td class="n">${r.P}</td><td class="n">${r.W}</td><td class="n">${r.P ? fmtN(Math.round(r.avg)) : "–"}</td><td class="n">${r.P ? fmtN(r.best) : "–"}</td>
       <td><span class="form">${r.form.map(f => `<span class="chip ${f.rank === 1 ? "win" : f.rank == null ? "miss" : ""}" title="${fmtDate(f.d, true)}">${f.rank ?? "–"}</span>`).join("")}</span></td>
-      <td class="n pts">${fmtN(r.pts)}</td></tr>`).join("");
+      <td class="n pts">${fmtN(r.pts)}${r.bonus ? `<div class="note" title="Catch-up: ${r.filled} day${r.filled === 1 ? "" : "s"} before joining × average ${fmtN(Math.round(r.avg))}">+${fmtN(r.bonus)} catch-up</div>` : ""}</td></tr>`).join("");
   const ids = t.rows.map(r => r.pid);
   const weekHtml = `<table><thead><tr><th>Player</th>${week.map(d => `<th class="n">${fmtDate(d, true)}</th>`).join("")}</tr></thead><tbody>${ids.map(pid => `<tr><td>${esc(pname(pid))}</td>${week.map(d => {
       const v = sc(pid, d); const mx = Math.max(-1, ...ids.map(p => sc(p, d) ?? -1));
       return `<td class="n" style="${v != null && v === mx ? "font-weight:600;color:var(--gold)" : v == null ? "color:var(--muted)" : ""}">${v == null ? "·" : fmtN(v)}</td>`;
     }).join("")}</tr>`).join("")}</tbody></table>`;
   el.innerHTML = `<a class="back" href="#leagues">← All leagues</a>
-    <div class="pagehead" style="margin-top:6px"><div><h2 style="font-size:32px">${esc(lg.name)}</h2><p class="meta">${members.length}/20 players · season started ${fmtDate(lg.startDate, true)} · created by ${esc(pname(lg.createdBy))}${lg.codeHash ? " · private, join code needed" : " · open to anyone"}</p></div>
-      <div class="row">${joinControl("leagues", lg)}${inIt && canWrite && !isCreator(lg) ? `<button class="btn" type="button" id="leave">Leave</button>` : ""}<a class="btn" href="#scores" style="text-decoration:none">Log a score</a>${manages(lg) ? `<button class="btn" type="button" id="edit-def">Edit</button><button class="btn danger" type="button" id="del-def">Delete</button>` : ""}</div></div>
+    <div class="pagehead" style="margin-top:6px"><div><h2 style="font-size:32px">${esc(lg.name)}</h2><p class="meta">${members.length}/20 players · ${seasonLabel(lg, true)} · created by ${esc(pname(lg.createdBy))}${lg.codeHash ? " · private, join code needed" : " · open to anyone"}</p></div>
+      <div class="row">${joinControl("leagues", lg)}${inIt && canWrite && !isCreator(lg) ? `<button class="btn" type="button" id="leave">Leave</button>` : ""}<a class="btn" href="#scores" style="text-decoration:none">Log a score</a>${manages(lg) && !SS.current.notStarted && SS.current.start < today ? `<button class="btn" type="button" id="end-season">End season early</button>` : ""}${manages(lg) ? `<button class="btn" type="button" id="edit-def">Edit</button><button class="btn danger" type="button" id="del-def">Delete</button>` : ""}</div></div>
     <section class="panel" style="margin-top:16px">
-      <div class="ph"><h2>Table</h2><div class="seg" role="group" aria-label="Period">${[["season", "Season"], ["month", "This month"], ["7", "Last 7 days"]].map(([k, l]) => `<button type="button" data-period="${k}" aria-pressed="${ui.leaguePeriod === k}">${l}</button>`).join("")}</div></div>
+      <div class="ph"><h2>Table</h2><div class="seg" role="group" aria-label="Period">${[["season", "Season " + SS.current.no], ["7", "Last 7 days"], ...(ui.leaguePeriod.startsWith("past:") ? [[ui.leaguePeriod, "Season " + SS.past[+ui.leaguePeriod.slice(5)].no]] : [])].map(([k, l]) => `<button type="button" data-period="${k}" aria-pressed="${ui.leaguePeriod === k}">${l}</button>`).join("")}</div></div>
       ${t.rows.length ? `<div class="tablewrap"><table><thead><tr><th></th><th>Player</th><th class="n" title="Days played">P</th><th class="n" title="Days with the top score">Day wins</th><th class="n">Avg</th><th class="n">Best</th><th>Last 5 (daily rank)</th><th class="n">Pts</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>
-      <p class="note" style="margin-top:10px">Pts is the sum of every Krillion score logged in the period. Ties on points are split by average, then day wins.</p>` : `<div class="empty">No players yet. Share the league name${lg.codeHash ? " and join code" : ""} so friends can find it under Leagues.</div>`}
+      <p class="note" style="margin-top:10px">${periodNote(lg, t)} Pts is the sum of every Krillion score logged${lg.catchUp ? ", plus catch-up points for late joiners (their average for each season day before they joined)" : ""}. Ties on points are split by average, then day wins.</p>` : `<div class="empty">No players yet. Share the league name${lg.codeHash ? " and join code" : ""} so friends can find it under Leagues.</div>`}
     </section>
-    ${t.rows.length ? `<section class="panel"><h2>Last 7 days</h2><div class="tablewrap">${weekHtml}</div></section>` : ""}`;
+    ${t.rows.length ? `<section class="panel"><h2>Last 7 days</h2><div class="tablewrap">${weekHtml}</div></section>` : ""}
+    ${pastSeasonsHtml(lg, SS)}`;
   $$("[data-period]", el).forEach(b => b.onclick = () => { ui.leaguePeriod = b.dataset.period; updateLeagueDetail(); });
   if ($("#leave")) $("#leave").onclick = () => leaveFlow("leagues", lg);
   if ($("#edit-def")) $("#edit-def").onclick = () => defDialog("leagues", lg);
+  if ($("#end-season")) $("#end-season").onclick = () => endSeasonFlow(lg);
+  $$("[data-season]", el).forEach(b => b.onclick = () => { ui.leaguePeriod = "past:" + b.dataset.season; updateLeagueDetail(); $("#league-detail .panel")?.scrollIntoView({ behavior: "smooth", block: "start" }); });
   if ($("#del-def")) $("#del-def").onclick = () => confirmDialog(`Delete “${lg.name}”?`, "The table goes, but everyone's scores stay and still count in other leagues and tournaments.", "Delete league", async () => { await deleteDef("leagues", lg); location.hash = "leagues"; });
 }
 
@@ -873,7 +947,8 @@ function defDialog(kind, def) {
   openDialog(`<h2>${editing ? "Edit " + word : "New " + word}</h2>
     <form class="stack" id="df-form" autocomplete="off">
       <div class="field"><label for="df-name">${isL ? "League" : "Tournament"} name</label><input type="text" id="df-name" maxlength="60" required value="${esc(def?.name || "")}" placeholder="${isL ? "e.g. LIS Krillion League" : "e.g. Krillion World Cup"}"></div>
-      ${isL ? `<div class="field"><label for="df-start">Season starts</label><input type="date" id="df-start" required value="${esc(def?.startDate || todayStr())}"></div>` : ""}
+      ${isL && !(editing && Array.isArray(def.history) && def.history.length) ? `<div class="field"><label for="df-start">${editing ? "First season started" : "First season starts"}</label><input type="date" id="df-start" required value="${esc(def?.startDate || todayStr())}"><p class="note">Seasons last 14 days and roll over automatically. You can end one early from the league page.</p></div>` : ""}
+      ${isL ? `<div class="field"><label class="check"><input type="checkbox" id="df-catch" ${def?.catchUp ? "checked" : ""}> Catch-up points for late joiners</label><p class="note">Someone who joins mid-season gets their season average added for each day before they joined, so they can still compete. Off: they just start from zero.</p></div>` : ""}
       <div class="field"><label for="df-code">Join code ${editing && def.codeHash ? "(this " + word + " has one)" : "(optional)"}</label>
         <input type="text" id="df-code" maxlength="30" placeholder="${editing && def.codeHash ? "Type a new code to change it" : "Leave blank so anyone can join"}">
         ${editing && def.codeHash ? `<label class="check"><input type="checkbox" id="df-nocode"> Remove the code and open it to anyone</label>` : ""}
@@ -899,7 +974,12 @@ function defDialog(kind, def) {
     if (code) hash = await codeHash(id, code); else if ($("#df-nocode")?.checked) hash = null;
     const data = editing ? { ...stripId(def), name, members: sel, removed, codeHash: hash } : { name, members: sel, removed: [], codeHash: hash, created: Date.now() };
     delete data.createdBy; delete data.groups;
-    if (isL) data.startDate = $("#df-start").value;
+    if (isL) {
+      if ($("#df-start")) { data.startDate = $("#df-start").value; if (!(Array.isArray(data.history) && data.history.length)) data.seasonAnchor = null; }
+      data.catchUp = !!$("#df-catch")?.checked;
+      const addedAt = { ...(def?.addedAt || {}) }; if (editing) sel.filter(p => !cur.includes(p)).forEach(p => { addedAt[p] = Date.now(); });
+      data.addedAt = addedAt;
+    }
     if (!isL && !editing) data.status = "signup";
     $("#df-save").disabled = true;
     try {
@@ -1162,40 +1242,70 @@ function makeDb(sb) {
 
 /* ---------- sign-in ---------- */
 let sb = null;
+/* email links (confirm, reset) come back to the site root; the login tokens ride in the #fragment */
+const SITE_URL = () => location.origin + "/";
+/* read what an email link brought back before the router or Supabase touch the URL */
+const AUTH_HASH = (() => { const h = new URLSearchParams((location.hash || "").replace(/^#/, "")); return { recovery: h.get("type") === "recovery", error: h.get("error_description") || h.get("error"), code: h.get("error_code") }; })();
 function authHtml() {
   return `<section class="panel" style="max-width:460px">
     <div class="seg" role="group" aria-label="Sign in or create an account" style="margin-bottom:14px"><button type="button" data-am="in" aria-pressed="${ui.authMode !== "up"}">Sign in</button><button type="button" data-am="up" aria-pressed="${ui.authMode === "up"}">Create account</button></div>
     <form class="stack" id="au-form" autocomplete="on">
       <h2>${ui.authMode === "up" ? "Create an account" : "Sign in"}</h2>
-      <div class="field"><label for="au-email">Email</label><input type="email" id="au-email" autocomplete="email" required></div>
+      <div class="field"><label for="au-email">Email</label><input type="email" id="au-email" autocomplete="email" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="email" required value="${esc(ui.authEmail || "")}"></div>
       <div class="field"><label for="au-pw">Password</label><input type="password" id="au-pw" minlength="8" autocomplete="${ui.authMode === "up" ? "new-password" : "current-password"}" required>${ui.authMode === "up" ? `<p class="note">At least 8 characters.</p>` : ""}</div>
-      <p class="bad" id="au-err"></p>
+      <p class="${ui.authMsg?.ok ? "note" : "bad"}" id="au-err">${esc(ui.authMsg?.text || "")}</p>
       <div class="row"><button class="btn primary" type="submit" id="au-go">${ui.authMode === "up" ? "Create account" : "Sign in"}</button>${ui.authMode === "up" ? "" : `<button class="btn small" type="button" id="au-forgot">Forgot password?</button>`}</div>
     </form></section>`;
 }
 function wireAuth() {
   $$("[data-am]").forEach(b => b.onclick = () => { ui.authMode = b.dataset.am; mount(); });
   $("#au-form").onsubmit = async e => {
-    e.preventDefault(); const email = $("#au-email").value.trim(), password = $("#au-pw").value;
-    $("#au-go").disabled = true; $("#au-err").textContent = "";
-    const { data, error } = ui.authMode === "up" ? await sb.auth.signUp({ email, password, options: { emailRedirectTo: location.origin } }) : await sb.auth.signInWithPassword({ email, password });
+    e.preventDefault(); const email = $("#au-email").value.trim().toLowerCase(), password = $("#au-pw").value;
+    ui.authEmail = email; ui.authMsg = null;
+    $("#au-go").disabled = true; $("#au-err").className = "bad"; $("#au-err").textContent = "";
+    let data, error;
+    try { ({ data, error } = ui.authMode === "up" ? await sb.auth.signUp({ email, password, options: { emailRedirectTo: SITE_URL() } }) : await sb.auth.signInWithPassword({ email, password })); }
+    catch (err) { error = { message: "Couldn't reach the login server. Check your connection and try again." }; }
     $("#au-go").disabled = false;
-    if (error) { $("#au-err").textContent = error.message; return; }
+    if (error) {
+      const m = error.message || "";
+      if (/invalid login credentials/i.test(m)) $("#au-err").textContent = "Wrong email or password. Passwords are case-sensitive (phones often capitalise the first letter). Forgot it? Tap “Forgot password?”.";
+      else if (/email not confirmed/i.test(m)) { $("#au-err").innerHTML = `This email hasn't been confirmed yet. <button class="btn small" type="button" id="au-resend">Resend confirmation email</button>`; $("#au-resend").onclick = async () => { const { error: e2 } = await sb.auth.resend({ type: "signup", email, options: { emailRedirectTo: SITE_URL() } }); $("#au-err").className = e2 ? "bad" : "note"; $("#au-err").textContent = e2 ? e2.message : "Sent. Open the link in the email, then sign in here."; }; }
+      else if (/already registered/i.test(m)) $("#au-err").textContent = "There's already an account with that email. Switch to “Sign in”.";
+      else if (/rate limit|too many/i.test(m)) $("#au-err").textContent = "Too many attempts or emails in a short time. Wait a few minutes and try again.";
+      else $("#au-err").textContent = m;
+      return;
+    }
     if (ui.authMode === "up" && !data.session) { $("#au-err").className = "note"; $("#au-err").textContent = "Check your inbox and click the confirmation link, then sign in."; }
   };
   if ($("#au-forgot")) $("#au-forgot").onclick = async () => {
-    const email = $("#au-email").value.trim(); if (!email) { $("#au-err").textContent = "Type your email first."; return; }
-    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + "/#reset" });
-    $("#au-err").className = error ? "bad" : "note"; $("#au-err").textContent = error ? error.message : "If that email has an account, a reset link is on its way.";
+    const email = $("#au-email").value.trim().toLowerCase(); if (!email) { $("#au-err").className = "bad"; $("#au-err").textContent = "Type your email first."; return; }
+    $("#au-forgot").disabled = true;
+    const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: SITE_URL() });
+    $("#au-forgot").disabled = false;
+    $("#au-err").className = error ? "bad" : "note";
+    $("#au-err").textContent = error ? (/rate limit|too many|seconds/i.test(error.message || "") ? "A reset email was sent very recently. Wait a minute, then try again." : error.message) : "If that email has an account, a reset link is on its way. Check spam too. The link works on any device, but only once and only for about an hour.";
   };
 }
 function resetDialog() {
-  openDialog(`<h2>Choose a new password</h2><form class="stack" id="np-form"><div class="field"><label for="np-pw">New password</label><input type="password" id="np-pw" minlength="8" autocomplete="new-password" required></div><p class="bad" id="np-err"></p><div class="actions"><button class="btn primary" type="submit">Save password</button></div></form>`);
-  $("#np-form").onsubmit = async e => { e.preventDefault(); const { error } = await sb.auth.updateUser({ password: $("#np-pw").value }); if (error) $("#np-err").textContent = error.message; else { closeDialog(); toast("Password updated."); history.replaceState(null, "", location.pathname + "#scores"); } };
+  if (resetDialog.open) return; resetDialog.open = true;
+  openDialog(`<h2>Choose a new password</h2><form class="stack" id="np-form"><div class="field"><label for="np-pw">New password</label><input type="password" id="np-pw" minlength="8" autocomplete="new-password" required></div><div class="field"><label for="np-pw2">Type it again</label><input type="password" id="np-pw2" minlength="8" autocomplete="new-password" required></div><p class="bad" id="np-err"></p><div class="actions"><button class="btn" type="button" id="np-c">Cancel</button><button class="btn primary" type="submit" id="np-go">Save password</button></div></form>`);
+  $("#np-c").onclick = () => { resetDialog.open = false; closeDialog(); };
+  $("#np-form").onsubmit = async e => {
+    e.preventDefault();
+    if ($("#np-pw").value !== $("#np-pw2").value) { $("#np-err").textContent = "The two passwords don't match."; return; }
+    $("#np-go").disabled = true;
+    const { error } = await sb.auth.updateUser({ password: $("#np-pw").value });
+    $("#np-go").disabled = false;
+    if (error) $("#np-err").textContent = /different from the old/i.test(error.message || "") ? "That's your current password. Pick a different one." : error.message;
+    else { resetDialog.open = false; closeDialog(); toast("Password updated. Use it to sign in on your other devices."); }
+  };
 }
+dlg.addEventListener("close", () => { resetDialog.open = false; });
 function renderAccount() {
   const el = $("#account"); if (!el) return;
-  el.innerHTML = me.uid ? `<span>${esc(me.email || "")}</span><button class="btn small" type="button" id="sign-out">Sign out</button>` : "";
+  el.innerHTML = me.uid ? `<span>${esc(me.email || "")}</span><button class="btn small" type="button" id="chg-pw">Change password</button><button class="btn small" type="button" id="sign-out">Sign out</button>` : "";
+  if ($("#chg-pw")) $("#chg-pw").onclick = () => resetDialog();
   if ($("#sign-out")) $("#sign-out").onclick = async () => { await sb.auth.signOut(); location.hash = "scores"; location.reload(); };
 }
 
@@ -1206,6 +1316,12 @@ let lastDay = todayStr();
 setInterval(() => { if (todayStr() !== lastDay) { lastDay = todayStr(); update(); } }, 60000);
 let started = false;
 async function startData(session) {
+  if (started && me.uid === session.user.id) { me.email = session.user.email; renderAccount(); return; }
+  if (startData.busy) return startData.busy;
+  startData.busy = startDataInner(session).finally(() => { startData.busy = null; });
+  return startData.busy;
+}
+async function startDataInner(session) {
   me.uid = session.user.id; me.email = session.user.email;
   try { const { data } = await sb.rpc("is_admin"); me.isOwner = !!data; } catch {}
   renderAccount();
@@ -1228,14 +1344,23 @@ async function startData(session) {
   if (!window.supabase || !cfg.supabaseUrl || cfg.supabaseUrl.includes("YOUR-")) {
     me.booted = true; statusMsg = "This site isn't connected to its database yet. Fill in config.js with your Supabase URL and anon key."; renderStatus(); mount(); return;
   }
-  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
+  // implicit flow: email links carry the tokens themselves, so they work on a different device
+  // from the one that asked for them (the PKCE flow only works in the same browser)
+  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, { auth: { flowType: "implicit", detectSessionInUrl: true, persistSession: true, autoRefreshToken: true } });
+  // don't call Supabase inside this callback (it can deadlock the auth lock): hand off with setTimeout
   sb.auth.onAuthStateChange((event, session) => {
-    if (event === "PASSWORD_RECOVERY") resetDialog();
-    if (session && !started) startData(session);
+    if (event === "PASSWORD_RECOVERY") setTimeout(resetDialog, 0);
+    if (event === "SIGNED_OUT") return;
+    if (session) setTimeout(() => startData(session), 0);
   });
   const { data: { session } } = await sb.auth.getSession();
   me.booted = true;
-  if (session) await startData(session); else { statusMsg = ""; renderStatus(); mount(); }
+  if (AUTH_HASH.error) {
+    ui.authMsg = { text: AUTH_HASH.code === "otp_expired" || /expired|invalid/i.test(AUTH_HASH.error) ? "That email link has expired or was already used (some email apps open links to scan them). Request a new one below and open it straight away." : AUTH_HASH.error };
+    history.replaceState(null, "", location.pathname + "#scores");
+  }
+  if (session) { await startData(session); if (AUTH_HASH.recovery) resetDialog(); }
+  else { statusMsg = ""; renderStatus(); mount(); }
 })();
 </script>
 </body>
