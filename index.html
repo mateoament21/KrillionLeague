@@ -69,7 +69,25 @@ main .wrap{display:grid;gap:20px}
 .panel{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:18px}
 .panel > h2,.panel > .ph{margin-bottom:12px}
 .ph{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:20px}
+.grid2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:16px;align-items:start}
+#view{display:grid;gap:16px;align-content:start}
+#score-form{gap:10px}
+#score-form textarea{min-height:0}
+.locked{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:14px;color:var(--muted)}
+.locked b{font-size:28px;color:var(--ink)}
+.gear{position:relative}
+.gear > button{border:1px solid var(--line);background:var(--surface);border-radius:4px;padding:3px 7px;cursor:pointer;line-height:1;display:inline-flex;align-items:center}
+.gear > button svg{width:16px;height:16px;fill:var(--muted)}
+.gear > button:hover svg,.gear > button[aria-expanded="true"] svg{fill:var(--ink)}
+.gear .menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;background:var(--surface);border:1px solid var(--line);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.25);padding:6px;min-width:220px;display:grid;gap:2px}
+.gear .menu[hidden]{display:none}
+.gear .menu b{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);padding:6px 8px 2px}
+.gear .menu button{border:0;background:transparent;text-align:left;padding:7px 8px;border-radius:4px;cursor:pointer;font-size:14px}
+.gear .menu button:hover{background:var(--soft)}
+.gear .menu button[aria-checked="true"]{font-weight:600}
+.gear .menu button[aria-checked="true"]:before{content:"✓ ";color:var(--accent)}
+ol.board li.sep{border-bottom:0;padding:0;height:6px}
+#board-scope{font-size:12px;color:var(--muted);margin:-8px 0 6px}
 @media (max-width:760px){.grid2{grid-template-columns:1fr}}
 .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:14px}
 .card{display:grid;gap:6px;text-decoration:none;background:var(--surface);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:6px;padding:14px 16px}
@@ -153,6 +171,7 @@ ol.board li .rk{font-family:var(--mono);color:var(--muted)}
 ol.board li.top .rk{color:var(--gold);font-weight:600}
 ol.board li .sc{font-family:var(--mono);font-weight:600}
 ol.board li.missing{color:var(--muted)}
+ol.board li.me{background:color-mix(in srgb,var(--accent) 10%,transparent)}
 ul.plist{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
 ul.plist li{display:flex;justify-content:space-between;align-items:center;gap:8px;border:1px solid var(--line);border-radius:4px;padding:8px 10px}
 ul.plist .sub{font-size:12px;color:var(--muted)}
@@ -737,17 +756,17 @@ function scoresSkeleton() {
       </form></section>`;
   return `<section class="grid2">
     <form class="panel stack" id="score-form" autocomplete="off">
-      <div class="ph"><h2>Log a result</h2><span class="pill" id="me-pill"></span></div>
+      <div class="ph"><h2>Log a result</h2></div>
       <div id="sf-body">
         <label for="sf-paste">Paste today's Krillion share text</label>
-        <textarea id="sf-paste" rows="4" placeholder="Krillion #122 🦐&#10;330&#10;&#10;⬛🦑🫧🐟🏮🦑🏮" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
+        <textarea id="sf-paste" rows="3" placeholder="Krillion #122 🦐&#10;330&#10;&#10;⬛🦑🫧🐟🏮🦑🏮" autocomplete="off" autocorrect="off" spellcheck="false"></textarea>
         <div id="sf-preview" class="preview"></div>
       </div>
       <p class="note" id="sf-note"></p>
       <div class="row" id="sf-row"><button class="btn primary" id="sf-save" type="submit" disabled>Lock in result</button></div>
-      <p class="note">Results can only be pasted, only on the day of the puzzle, and can't be changed once saved.</p>
+      <p class="note" id="sf-rules">Paste only, on the day, no changes once saved.</p>
     </form>
-    <section class="panel"><div class="ph"><h2 id="board-title">Daily board</h2><div class="row"><span class="pill" id="board-count"></span><div class="seg" role="group" aria-label="Choose day"><button type="button" id="bd-prev" aria-label="Previous day">‹</button><button type="button" id="bd-next" aria-label="Next day">›</button></div></div></div><ol class="board" id="day-board"></ol></section>
+    <section class="panel"><div class="ph"><h2 id="board-title">Today's Top Divers</h2><div class="row"><span class="pill" id="board-count"></span><div class="seg" role="group" aria-label="Choose day"><button type="button" id="bd-prev" aria-label="Previous day">‹</button><button type="button" id="bd-next" aria-label="Next day">›</button></div><div class="gear"><button type="button" id="bd-gear" aria-haspopup="true" aria-expanded="false" aria-label="Choose who to rank" title="Choose who to rank"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.4 1l.4 1.9c.5.2.9.4 1.3.7l1.8-.6 1.4 2.4-1.4 1.3c.1.5.1 1 0 1.6l1.4 1.3-1.4 2.4-1.8-.6c-.4.3-.8.6-1.3.7L9.4 15H6.6l-.4-1.9c-.5-.2-.9-.4-1.3-.7l-1.8.6-1.4-2.4 1.4-1.3c-.1-.5-.1-1 0-1.6L1.7 6.4l1.4-2.4 1.8.6c.4-.3.8-.6 1.3-.7L6.6 1h2.8zM8 5.5a2.5 2.5 0 100 5 2.5 2.5 0 000-5z"/></svg></button><div class="menu" id="bd-menu" role="menu" hidden></div></div></div></div><p id="board-scope"></p><ol class="board" id="day-board"></ol></section>
   </section>
   <section class="panel"><div class="ph"><h2>My standings</h2><button class="btn small" type="button" id="rename-me">Change my name</button></div><div id="my-stats" class="stats"></div><div id="my-switch"></div><div id="my-log"></div></section>
   <section class="panel friends">
@@ -765,7 +784,6 @@ function updateScores() {
   if (mountedAs !== want) mount();
   if (want !== "app") return;
   const ps = sortedPlayers();
-  $("#me-pill").textContent = "Signed in as " + pname(me.uid);
   syncScoreForm(); renderBoard(); renderMyLog();
   renderFriends();
   $$("#rename-me").forEach(b => b.disabled = !canWrite || !db);
@@ -808,10 +826,10 @@ function syncScoreForm() {
   $("#sf-body").hidden = cur != null;
   if (cur != null) {
     const g = S.players.get(me.uid)?.games?.[today];
-    note.innerHTML = `<b class="num" style="font-size:22px">${fmtN(cur)}</b> locked in for today${g?.e ? ` <span class="emo">${esc(g.e)}</span>` : ""}. Come back tomorrow for the next puzzle.`;
-    save.hidden = true; return;
+    note.innerHTML = `<span class="locked"><b class="num">${fmtN(cur)}</b>locked in${g?.e ? ` <span class="emo">${esc(g.e)}</span>` : ""}</span><span class="note">Back tomorrow for the next puzzle.</span>`;
+    save.hidden = true; $("#sf-rules").hidden = true; return;
   }
-  save.hidden = false;
+  save.hidden = false; $("#sf-rules").hidden = false;
   const e = currentEntry();
   if (!e) { pv.innerHTML = ""; note.textContent = todaysPuzzle() ? `Today's puzzle is Krillion #${todaysPuzzle()}.` : ""; save.disabled = true; return; }
   if (e.error) { pv.innerHTML = `<span class="bad">${esc(e.error)}</span>`; note.textContent = ""; save.disabled = true; return; }
@@ -819,18 +837,36 @@ function syncScoreForm() {
   note.textContent = e.clown ? "700? Sure. That counts as 0. Once saved it can't be changed." : "Check it's right: once saved it can't be changed.";
   save.disabled = !canWrite || !db;
 }
+/* who the board ranks: everyone, one of your leagues, or you + your friends */
+function boardScopes() {
+  const ls = [...S.leagues.values()].filter(l => leagueMembers(l).includes(me.uid)).sort((a, b) => a.name.localeCompare(b.name));
+  return [{ key: "all", label: "All players" }, { key: "f", label: "Friends" }, ...ls.map(l => ({ key: "l:" + l.id, label: l.name, league: true }))];
+}
+function boardScope() {
+  const want = ui.boardScope || lsGet("kc-board") || "all", opts = boardScopes();
+  return opts.find(o => o.key === want) || opts[0];
+}
+function boardPool(scope) {
+  if (scope.key === "f") return [me.uid, ...myFriends()].map(id => S.players.get(id)).filter(Boolean);
+  if (scope.key.startsWith("l:")) return leagueMembers(S.leagues.get(scope.key.slice(2))).map(id => S.players.get(id)).filter(Boolean);
+  return sortedPlayers();
+}
 function renderBoard() {
   const d = ui.boardDay && ui.boardDay < todayStr() ? ui.boardDay : todayStr();
   if ($("#bd-next")) $("#bd-next").disabled = d >= todayStr();
-  $("#board-title").textContent = d === todayStr() ? "Today's board" : "Board for " + fmtDate(d, true);
-  const ps = sortedPlayers();
-  const inn = ps.filter(p => sc(p.id, d) != null).sort((a, b) => sc(b.id, d) - sc(a.id, d));
-  const out = ps.filter(p => sc(p.id, d) == null);
+  $("#board-title").textContent = d === todayStr() ? "Today's Top Divers" : "Top Divers · " + fmtDate(d, true);
+  const scope = boardScope(), ps = boardPool(scope);
+  $("#board-scope").textContent = scope.key === "all" ? "" : scope.key === "f" ? "You and your friends" : "League: " + scope.label;
+  const inn = ps.filter(p => sc(p.id, d) != null).sort((a, b) => sc(b.id, d) - sc(a.id, d) || a.name.localeCompare(b.name));
   $("#board-count").textContent = `${inn.length}/${ps.length} in`;
   const top = inn.length ? sc(inn[0].id, d) : null;
-  let html = inn.map(p => { const v = sc(p.id, d); const rk = 1 + inn.filter(q => sc(q.id, d) > v).length; const g = p.games?.[d]; return `<li class="${v === top ? "top" : ""}"><span class="rk">${rk}</span><span>${esc(p.name)}${g?.e ? ` <span class="emo">${esc(g.e)}</span>` : ""}</span><span class="sc">${fmtN(v)}</span></li>`; }).join("");
-  html += out.map(p => `<li class="missing"><span class="rk">–</span><span>${esc(p.name)}</span><span class="note">not in yet</span></li>`).join("");
-  $("#day-board").innerHTML = html || `<li class="empty" style="display:block">No players yet.</li>`;
+  const row = p => { const v = sc(p.id, d); const rk = 1 + inn.filter(q => sc(q.id, d) > v).length; const g = p.games?.[d]; return `<li class="${v === top ? "top" : ""}${p.id === me.uid ? " me" : ""}"><span class="rk">${rk}</span><span>${esc(p.name)}${p.id === me.uid ? ' <span class="note">(you)</span>' : ""}${g?.e ? ` <span class="emo">${esc(g.e)}</span>` : ""}</span><span class="sc">${fmtN(v)}</span></li>`; };
+  let html = inn.slice(0, 5).map(row).join("");
+  const mi = inn.findIndex(p => p.id === me.uid);
+  if (mi >= 5) html += `<li class="sep"></li>` + row(inn[mi]);
+  $("#day-board").innerHTML = html || `<li class="empty" style="display:block">${scope.key === "f" && ps.length < 2 ? "Add friends below to rank them here." : "Nobody's in yet."}</li>`;
+  const menu = $("#bd-menu");
+  if (menu) menu.innerHTML = boardScopes().map((o, i, a) => `${o.league && !a[i - 1]?.league ? "<b>Your leagues</b>" : ""}<button type="button" role="menuitemradio" aria-checked="${o.key === scope.key}" data-scope="${esc(o.key)}">${esc(o.label)}</button>`).join("");
 }
 const ord = n => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
 function myCupStatus(cup, M) {
@@ -1403,6 +1439,16 @@ function wireMounted() {
     ev.preventDefault(); $("#sf-paste").value = t; syncScoreForm();
   });
   $("#sf-paste").oninput = syncScoreForm;
+  const gear = $("#bd-gear"), menu = $("#bd-menu");
+  const closeMenu = () => { menu.hidden = true; gear.setAttribute("aria-expanded", "false"); };
+  gear.onclick = ev => { ev.stopPropagation(); const open = menu.hidden; menu.hidden = !open; gear.setAttribute("aria-expanded", String(open)); };
+  menu.onclick = ev => { const b = ev.target.closest("[data-scope]"); if (!b) return; ui.boardScope = b.dataset.scope; lsSet("kc-board", b.dataset.scope); closeMenu(); renderBoard(); };
+  if (!wireMounted.gearDoc) {
+    wireMounted.gearDoc = true;
+    const shut = () => { const m = $("#bd-menu"); if (m) m.hidden = true; $("#bd-gear")?.setAttribute("aria-expanded", "false"); };
+    document.addEventListener("click", ev => { if (!ev.target.closest(".gear")) shut(); });
+    document.addEventListener("keydown", ev => { if (ev.key === "Escape") shut(); });
+  }
   $("#bd-prev").onclick = () => { ui.boardDay = addDays(ui.boardDay && ui.boardDay < todayStr() ? ui.boardDay : todayStr(), -1); renderBoard(); };
   $("#bd-next").onclick = () => { const n = addDays(ui.boardDay || todayStr(), 1); ui.boardDay = n >= todayStr() ? null : n; renderBoard(); };
   $("#score-form").onsubmit = async ev => {
